@@ -12,7 +12,6 @@ import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
-
 import com.github.catvod.bean.Result;
 import com.github.catvod.bean.Vod;
 import com.github.catvod.bean.quark.Cache;
@@ -26,7 +25,6 @@ import com.github.catvod.spider.Init;
 import com.github.catvod.spider.Proxy;
 import com.github.catvod.utils.*;
 import com.google.gson.Gson;
-
 import org.apache.commons.lang3.StringUtils;
 
 import java.io.ByteArrayInputStream;
@@ -73,7 +71,7 @@ public class QuarkApi {
         if (Util.getExt(url).contains("m3u8")) {
             return getM3u8(url, header);
         }
-        return ProxyVideo.proxy(url, header);
+        return ProxyVideo.proxyMultiThread(url, header);
     }
 
     /**
@@ -168,7 +166,7 @@ public class QuarkApi {
         } catch (Exception e) {
             SpiderDebug.log("资源已取消:" + e.getMessage());
             Notify.show("资源已取消");
-            throw  new RuntimeException(e);
+            throw new RuntimeException(e);
         }
 
         List<String> playFrom = QuarkApi.get().getPlayFormatList();
@@ -212,15 +210,18 @@ public class QuarkApi {
 
         String fileId = split[0], fileToken = split[1], shareId = split[2], stoken = split[3];
         String playUrl = "";
-        if (flag.contains("quark原画")) {
-            playUrl = this.getDownload(shareId, stoken, fileId, fileToken, true);
-        } else {
-            playUrl = this.getLiveTranscoding(shareId, stoken, fileId, fileToken, flag);
-        }
         Map<String, String> header = getHeaders();
         header.remove("Host");
         header.remove("Content-Type");
-        return Result.get().url(proxyVideoUrl(playUrl, header)).octet().header(header).string();
+        if (flag.contains("quark原画")) {
+            playUrl = this.getDownload(shareId, stoken, fileId, fileToken, true);
+            return Result.get().url(ProxyServer.INSTANCE.buildProxyUrl(playUrl, header)).octet().header(header).string();
+        } else {
+            playUrl = this.getLiveTranscoding(shareId, stoken, fileId, fileToken, flag);
+            return Result.get().url(proxyVideoUrl(playUrl, header)).octet().header(header).string();
+        }
+
+
     }
 
     private String proxyVideoUrl(String url, Map<String, String> header) {
@@ -377,7 +378,7 @@ public class QuarkApi {
 
     public List<String> getPlayFormatList() {
         if (this.isVip) {
-            return Arrays.asList("4K", "超清", "高清", "普画");
+            return Arrays.asList("4K"/*, "超清", "高清", "普画"*/);
         } else {
             return Collections.singletonList("普画");
         }
@@ -413,7 +414,7 @@ public class QuarkApi {
         for (Map<String, Object> item : items) {
             if (Boolean.TRUE.equals(item.get("dir"))) {
                 subDir.add(item);
-            } else if (Boolean.TRUE.equals(item.get("file")) && "video".equals(item.get("obj_category"))) {
+            } else if (Boolean.TRUE.equals(item.get("file")) && (Util.isMedia((String) item.get("file_name")))) {
                 if ((Double) item.get("size") < 1024 * 1024 * 5) continue;
                 item.put("stoken", this.shareTokenCache.get(shareData.getShareId()).get("stoken"));
                 videos.add(Item.objectFrom(item, shareData.getShareId(), shareIndex));
@@ -474,14 +475,17 @@ public class QuarkApi {
     }
 
     private void clearSaveDir() throws Exception {
-
         Map<String, Object> listData = Json.parseSafe(api("file/sort?" + this.pr + "&pdir_fid=" + this.saveDirId + "&_page=1&_size=200&_sort=file_type:asc,updated_at:desc", Collections.emptyMap(), Collections.emptyMap(), 0, "GET"), Map.class);
-        if (listData.get("data") != null && ((List<Map<String, Object>>) ((Map<String, Object>) listData.get("data")).get("list")).size() > 0) {
-            List<String> list = new ArrayList<>();
-            for (Map<String, Object> stringStringMap : ((List<Map<String, Object>>) ((Map<String, Object>) listData.get("data")).get("list"))) {
-                list.add((String) stringStringMap.get("fid"));
+
+        if (listData.get("data") != null) {
+            List<Map<String, Object>> fileList = (List<Map<String, Object>>) ((Map<String, Object>) listData.get("data")).get("list");
+            if (fileList.size() >= 10) {
+                List<String> fileIdsToDelete = new ArrayList<>();
+                for (Map<String, Object> file : fileList) {
+                    fileIdsToDelete.add((String) file.get("fid"));
+                }
+                api("file/delete?" + this.pr + "&uc_param_str=", Collections.emptyMap(), Map.of("action_type", 2, "filelist", fileIdsToDelete, "exclude_fids", Collections.emptyList()), 0, "POST");
             }
-            api("file/delete?" + this.pr, Collections.emptyMap(), Map.of("action_type", "2", "filelist", Json.toJson(list), "exclude_fids", ""), 0, "POST");
         }
     }
 
@@ -716,6 +720,195 @@ public class QuarkApi {
             if (dialog != null) dialog.dismiss();
         } catch (Exception ignored) {
         }
+    }
+
+    // ========== 个人网盘相关方法 ==========
+
+    /**
+     * 路径到文件ID的缓存
+     */
+    private Map<String, String> pathToFidCache = new HashMap<>();
+
+    /**
+     * 清除路径缓存（用于刷新）
+     */
+    public void clearPathCache() {
+        pathToFidCache.clear();
+    }
+
+    /**
+     * 检查登录状态
+     */
+    public boolean isLoggedIn() {
+        return cookie != null && !cookie.isEmpty() && cookie.contains("__pus");
+    }
+
+    /**
+     * 获取个人网盘文件夹列表
+     * @param path 相对路径，如 "视频/电影"
+     * @return 文件夹列表
+     */
+    public List<Item> listPersonalFolders(String path) throws Exception {
+        String parentFid = getFidByPath(path);
+        String response = api("file/sort?" + pr + "&pdir_fid=" + parentFid + "&_page=1&_size=200&_sort=file_type:asc,file_name:asc", Collections.emptyMap(), Collections.emptyMap(), 0, "GET");
+        Map<String, Object> data = Json.parseSafe(response, Map.class);
+        List<Item> folders = new ArrayList<>();
+        if (data.get("data") != null) {
+            List<Map<String, Object>> items = (List<Map<String, Object>>) ((Map<String, Object>) data.get("data")).get("list");
+            if (items != null) {
+                for (Map<String, Object> item : items) {
+                    if (Boolean.TRUE.equals(item.get("dir"))) {
+                        Item folder = new Item();
+                        folder.setFid(item.get("fid") != null ? item.get("fid").toString() : "");
+                        folder.setName(item.get("file_name") != null ? item.get("file_name").toString() : "");
+                        folders.add(folder);
+                    }
+                }
+            }
+        }
+        return folders;
+    }
+
+    /**
+     * 获取个人网盘文件列表（所有文件，包括视频、图片、txt等）
+     * @param path 相对路径
+     * @return 文件列表
+     */
+    public List<Item> listPersonalFiles(String path) throws Exception {
+        String parentFid = getFidByPath(path);
+        String response = api("file/sort?" + pr + "&pdir_fid=" + parentFid + "&_page=1&_size=200&_sort=file_type:asc,file_name:asc", Collections.emptyMap(), Collections.emptyMap(), 0, "GET");
+        Map<String, Object> data = Json.parseSafe(response, Map.class);
+        List<Item> files = new ArrayList<>();
+        if (data.get("data") != null) {
+            List<Map<String, Object>> items = (List<Map<String, Object>>) ((Map<String, Object>) data.get("data")).get("list");
+            if (items != null) {
+                for (Map<String, Object> item : items) {
+                    // 只返回文件，不返回文件夹
+                    if (Boolean.TRUE.equals(item.get("file"))) {
+                        Item file = new Item();
+                        file.setFid(item.get("fid") != null ? item.get("fid").toString() : "");
+                        file.setName(item.get("file_name") != null ? item.get("file_name").toString() : "");
+                        files.add(file);
+                    }
+                }
+            }
+        }
+        return files;
+    }
+
+    /**
+     * 获取个人网盘文件的下载链接
+     * @param fileId 文件ID
+     * @return 下载URL
+     */
+    public String getPersonalFileUrl(String fileId) throws Exception {
+        Map<String, Object> down = Json.parseSafe(api("file/download?" + pr + "&uc_param_str=", Collections.emptyMap(), Map.of("fids", List.of(fileId)), 0, "POST"), Map.class);
+        if (down.get("data") != null) {
+            return ((List<Map<String, Object>>) down.get("data")).get(0).get("download_url").toString();
+        }
+        return null;
+    }
+
+    /**
+     * 个人网盘视频播放
+     * @param split 分割后的ID数组 [fileId]
+     * @param flag 播放线路标识
+     * @return 播放内容
+     */
+    public String playerContentPersonal(String[] split, String flag) throws Exception {
+        String fileId = split[0];
+        String playUrl = "";
+        Map<String, String> header = getHeaders();
+        header.remove("Host");
+        header.remove("Content-Type");
+        if (flag.contains("原画")) {
+            playUrl = getPersonalDownload(fileId);
+            return Result.get().url(ProxyServer.INSTANCE.buildProxyUrl(playUrl, header)).octet().header(header).string();
+        } else {
+            playUrl = getPersonalTranscoding(fileId);
+            return Result.get().url(proxyVideoUrl(playUrl, header)).octet().header(header).string();
+        }
+    }
+
+    /**
+     * 个人网盘原画下载链接
+     */
+    private String getPersonalDownload(String fileId) throws Exception {
+        Map<String, Object> down = Json.parseSafe(api("file/download?" + pr + "&uc_param_str=", Collections.emptyMap(), Map.of("fids", List.of(fileId)), 0, "POST"), Map.class);
+        if (down.get("data") != null) {
+            return ((List<Map<String, Object>>) down.get("data")).get(0).get("download_url").toString();
+        }
+        return null;
+    }
+
+    /**
+     * 个人网盘转码播放链接
+     */
+    private String getPersonalTranscoding(String fileId) throws Exception {
+        Map<String, Object> transcoding = Json.parseSafe(api("file/v2/play?" + pr, Collections.emptyMap(), Map.of("fid", fileId, "resolutions", "normal,low,high,super,2k,4k", "supports", "fmp4"), 0, "POST"), Map.class);
+        if (transcoding.get("data") != null && ((Map<Object, Object>) transcoding.get("data")).get("video_list") != null) {
+            List<Map<String, Object>> videoList = (List<Map<String, Object>>) ((Map<Object, Object>) transcoding.get("data")).get("video_list");
+            if (!videoList.isEmpty()) {
+                return (String) ((Map<String, Object>) videoList.get(0).get("video_info")).get("url");
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 根据路径获取文件ID
+     * @param path 相对路径，如 "视频/电影/流浪地球"
+     * @return 文件ID
+     */
+    private String getFidByPath(String path) throws Exception {
+        // 处理空路径或根目录
+        if (path == null || path.isEmpty() || path.equals("/")) {
+            return "0";
+        }
+
+        // 去掉开头的斜杠
+        path = path.startsWith("/") ? path.substring(1) : path;
+
+        // 检查缓存
+        if (pathToFidCache.containsKey(path)) {
+            return pathToFidCache.get(path);
+        }
+
+        // 逐级查找
+        String[] parts = path.split("/");
+        String currentFid = "0";
+        String currentPath = "";
+
+        for (String part : parts) {
+            if (part.isEmpty()) continue;
+            currentPath = currentPath.isEmpty() ? part : currentPath + "/" + part;
+
+            if (pathToFidCache.containsKey(currentPath)) {
+                currentFid = pathToFidCache.get(currentPath);
+                continue;
+            }
+
+            // 列出当前目录的文件
+            String response = api("file/sort?" + pr + "&pdir_fid=" + currentFid + "&_page=1&_size=200&_sort=file_type:asc,file_name:asc", Collections.emptyMap(), Collections.emptyMap(), 0, "GET");
+            Map<String, Object> data = Json.parseSafe(response, Map.class);
+
+            if (data.get("data") != null) {
+                List<Map<String, Object>> items = (List<Map<String, Object>>) ((Map<String, Object>) data.get("data")).get("list");
+                if (items != null) {
+                    for (Map<String, Object> item : items) {
+                        String name = item.get("file_name") != null ? item.get("file_name").toString() : "";
+                        if (name.equals(part)) {
+                            String fid = item.get("fid") != null ? item.get("fid").toString() : "";
+                            pathToFidCache.put(currentPath, fid);
+                            currentFid = fid;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        return currentFid;
     }
 
 }

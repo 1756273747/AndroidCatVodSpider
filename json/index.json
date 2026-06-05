@@ -36,6 +36,30 @@
   ],
   "sites": [
     {
+      "key": "QuarkPersonal",
+      "name": "☁我的夸克网盘",
+      "type": 3,
+      "api": "csp_QuarkPersonal",
+      "searchable": 0,
+      "filterable": 0,
+      "ext": {
+        "rootPath": "视频",
+        "categories": ["电影", "电视剧", "综艺", "动漫", "其它"],
+        "defaultPic": "",
+        "picExts": ["jpg", "jpeg", "png", "webp"],
+        "infoFile": "info.txt"
+      }
+    },
+    {
+      "key": "WebDAV",
+      "name": "☁WebDAV网盘",
+      "type": 3,
+      "api": "csp_WebDAV",
+      "searchable": 0,
+      "filterable": 1,
+      "ext": "./json/webdav.json"
+    },
+    {
       "key": "Introduce",
       "name": "Cookie设置",
       "type": 3,

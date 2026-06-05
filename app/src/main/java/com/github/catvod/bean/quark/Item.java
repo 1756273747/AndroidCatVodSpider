@@ -71,8 +71,16 @@ public class Item {
         return fileId.isEmpty() ? "" : fileId;
     }
 
+    public void setFid(String fid) {
+        this.fileId = fid;
+    }
+
     public String getName() {
         return name.isEmpty() ? "" : name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
     }
 
     public String getParent() {

@@ -722,5 +722,194 @@ public class QuarkApi {
         }
     }
 
+    // ========== 个人网盘相关方法 ==========
+
+    /**
+     * 路径到文件ID的缓存
+     */
+    private Map<String, String> pathToFidCache = new HashMap<>();
+
+    /**
+     * 清除路径缓存（用于刷新）
+     */
+    public void clearPathCache() {
+        pathToFidCache.clear();
+    }
+
+    /**
+     * 检查登录状态
+     */
+    public boolean isLoggedIn() {
+        return cookie != null && !cookie.isEmpty() && cookie.contains("__pus");
+    }
+
+    /**
+     * 获取个人网盘文件夹列表
+     * @param path 相对路径，如 "视频/电影"
+     * @return 文件夹列表
+     */
+    public List<Item> listPersonalFolders(String path) throws Exception {
+        String parentFid = getFidByPath(path);
+        String response = api("file/sort?" + pr + "&pdir_fid=" + parentFid + "&_page=1&_size=200&_sort=file_type:asc,file_name:asc", Collections.emptyMap(), Collections.emptyMap(), 0, "GET");
+        Map<String, Object> data = Json.parseSafe(response, Map.class);
+        List<Item> folders = new ArrayList<>();
+        if (data.get("data") != null) {
+            List<Map<String, Object>> items = (List<Map<String, Object>>) ((Map<String, Object>) data.get("data")).get("list");
+            if (items != null) {
+                for (Map<String, Object> item : items) {
+                    if (Boolean.TRUE.equals(item.get("dir"))) {
+                        Item folder = new Item();
+                        folder.setFid(item.get("fid") != null ? item.get("fid").toString() : "");
+                        folder.setName(item.get("file_name") != null ? item.get("file_name").toString() : "");
+                        folders.add(folder);
+                    }
+                }
+            }
+        }
+        return folders;
+    }
+
+    /**
+     * 获取个人网盘文件列表（所有文件，包括视频、图片、txt等）
+     * @param path 相对路径
+     * @return 文件列表
+     */
+    public List<Item> listPersonalFiles(String path) throws Exception {
+        String parentFid = getFidByPath(path);
+        String response = api("file/sort?" + pr + "&pdir_fid=" + parentFid + "&_page=1&_size=200&_sort=file_type:asc,file_name:asc", Collections.emptyMap(), Collections.emptyMap(), 0, "GET");
+        Map<String, Object> data = Json.parseSafe(response, Map.class);
+        List<Item> files = new ArrayList<>();
+        if (data.get("data") != null) {
+            List<Map<String, Object>> items = (List<Map<String, Object>>) ((Map<String, Object>) data.get("data")).get("list");
+            if (items != null) {
+                for (Map<String, Object> item : items) {
+                    // 只返回文件，不返回文件夹
+                    if (Boolean.TRUE.equals(item.get("file"))) {
+                        Item file = new Item();
+                        file.setFid(item.get("fid") != null ? item.get("fid").toString() : "");
+                        file.setName(item.get("file_name") != null ? item.get("file_name").toString() : "");
+                        files.add(file);
+                    }
+                }
+            }
+        }
+        return files;
+    }
+
+    /**
+     * 获取个人网盘文件的下载链接
+     * @param fileId 文件ID
+     * @return 下载URL
+     */
+    public String getPersonalFileUrl(String fileId) throws Exception {
+        Map<String, Object> down = Json.parseSafe(api("file/download?" + pr + "&uc_param_str=", Collections.emptyMap(), Map.of("fids", List.of(fileId)), 0, "POST"), Map.class);
+        if (down.get("data") != null) {
+            return ((List<Map<String, Object>>) down.get("data")).get(0).get("download_url").toString();
+        }
+        return null;
+    }
+
+    /**
+     * 个人网盘视频播放
+     * @param split 分割后的ID数组 [fileId]
+     * @param flag 播放线路标识
+     * @return 播放内容
+     */
+    public String playerContentPersonal(String[] split, String flag) throws Exception {
+        String fileId = split[0];
+        String playUrl = "";
+        Map<String, String> header = getHeaders();
+        header.remove("Host");
+        header.remove("Content-Type");
+        if (flag.contains("原画")) {
+            playUrl = getPersonalDownload(fileId);
+            return Result.get().url(ProxyServer.INSTANCE.buildProxyUrl(playUrl, header)).octet().header(header).string();
+        } else {
+            playUrl = getPersonalTranscoding(fileId);
+            return Result.get().url(proxyVideoUrl(playUrl, header)).octet().header(header).string();
+        }
+    }
+
+    /**
+     * 个人网盘原画下载链接
+     */
+    private String getPersonalDownload(String fileId) throws Exception {
+        Map<String, Object> down = Json.parseSafe(api("file/download?" + pr + "&uc_param_str=", Collections.emptyMap(), Map.of("fids", List.of(fileId)), 0, "POST"), Map.class);
+        if (down.get("data") != null) {
+            return ((List<Map<String, Object>>) down.get("data")).get(0).get("download_url").toString();
+        }
+        return null;
+    }
+
+    /**
+     * 个人网盘转码播放链接
+     */
+    private String getPersonalTranscoding(String fileId) throws Exception {
+        Map<String, Object> transcoding = Json.parseSafe(api("file/v2/play?" + pr, Collections.emptyMap(), Map.of("fid", fileId, "resolutions", "normal,low,high,super,2k,4k", "supports", "fmp4"), 0, "POST"), Map.class);
+        if (transcoding.get("data") != null && ((Map<Object, Object>) transcoding.get("data")).get("video_list") != null) {
+            List<Map<String, Object>> videoList = (List<Map<String, Object>>) ((Map<Object, Object>) transcoding.get("data")).get("video_list");
+            if (!videoList.isEmpty()) {
+                return (String) ((Map<String, Object>) videoList.get(0).get("video_info")).get("url");
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 根据路径获取文件ID
+     * @param path 相对路径，如 "视频/电影/流浪地球"
+     * @return 文件ID
+     */
+    private String getFidByPath(String path) throws Exception {
+        // 处理空路径或根目录
+        if (path == null || path.isEmpty() || path.equals("/")) {
+            return "0";
+        }
+
+        // 去掉开头的斜杠
+        path = path.startsWith("/") ? path.substring(1) : path;
+
+        // 检查缓存
+        if (pathToFidCache.containsKey(path)) {
+            return pathToFidCache.get(path);
+        }
+
+        // 逐级查找
+        String[] parts = path.split("/");
+        String currentFid = "0";
+        String currentPath = "";
+
+        for (String part : parts) {
+            if (part.isEmpty()) continue;
+            currentPath = currentPath.isEmpty() ? part : currentPath + "/" + part;
+
+            if (pathToFidCache.containsKey(currentPath)) {
+                currentFid = pathToFidCache.get(currentPath);
+                continue;
+            }
+
+            // 列出当前目录的文件
+            String response = api("file/sort?" + pr + "&pdir_fid=" + currentFid + "&_page=1&_size=200&_sort=file_type:asc,file_name:asc", Collections.emptyMap(), Collections.emptyMap(), 0, "GET");
+            Map<String, Object> data = Json.parseSafe(response, Map.class);
+
+            if (data.get("data") != null) {
+                List<Map<String, Object>> items = (List<Map<String, Object>>) ((Map<String, Object>) data.get("data")).get("list");
+                if (items != null) {
+                    for (Map<String, Object> item : items) {
+                        String name = item.get("file_name") != null ? item.get("file_name").toString() : "";
+                        if (name.equals(part)) {
+                            String fid = item.get("fid") != null ? item.get("fid").toString() : "";
+                            pathToFidCache.put(currentPath, fid);
+                            currentFid = fid;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        return currentFid;
+    }
+
 }
 

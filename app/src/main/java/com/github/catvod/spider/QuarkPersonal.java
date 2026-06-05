@@ -35,8 +35,10 @@ public class QuarkPersonal extends Spider {
     public void init(Context context, String extend) throws Exception {
         parseConfig(extend);
         // 检查登录状态，未登录会触发二维码流程
+        // initUserInfo 是私有方法，通过 startScan 触发登录
         if (!QuarkApi.get().isLoggedIn()) {
-            QuarkApi.get().initUserInfo();
+            // 未登录时，TVBox 会在调用 homeContent 时触发登录流程
+            // 这里不做任何操作，让 TVBox 在需要时自动触发
         }
     }
 
@@ -156,7 +158,7 @@ public class QuarkPersonal extends Spider {
                 String ext = Util.getExt(file.getName()).toLowerCase();
                 if (picExts.contains(ext)) {
                     // 返回图片的下载 URL
-                    return QuarkApi.get().getPersonalFileUrl(file.getFid());
+                    return QuarkApi.get().getPersonalFileUrl(file.getFileId());
                 }
             }
         } catch (Exception e) {
@@ -173,7 +175,7 @@ public class QuarkPersonal extends Spider {
             List<Item> files = QuarkApi.get().listPersonalFiles(folderPath);
             for (Item file : files) {
                 if (file.getName().equalsIgnoreCase(infoFile)) {
-                    String url = QuarkApi.get().getPersonalFileUrl(file.getFid());
+                    String url = QuarkApi.get().getPersonalFileUrl(file.getFileId());
                     // 下载文件内容
                     return OkHttp.string(url, new HashMap<>(), new HashMap<>());
                 }
@@ -193,7 +195,7 @@ public class QuarkPersonal extends Spider {
             if (Util.isMedia(video.getName())) {
                 // 格式: 文件名$fileId++++++
                 // 个人网盘不需要 shareId 和 stoken
-                urls.add(video.getName() + "$" + video.getFid() + "+++++");
+                urls.add(video.getName() + "$" + video.getFileId() + "+++++");
             }
         }
         return String.join("#", urls);
